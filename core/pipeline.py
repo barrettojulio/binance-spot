@@ -1,3 +1,4 @@
+# core/pipeline.py
 import time
 import os
 import csv
@@ -17,6 +18,7 @@ from scoring.thresholds import classify_zone
 from strategy.selector import select_top20_eligible
 from strategy.lanes import decide_lanes
 from strategy.allocator import allocate_budgets
+from strategy.trailing import build_entry_trigger  # ← Entry triggers (compra)
 
 from reporting.telegram_formatter import format_weekly_message
 from reporting.exports import export_weekly
@@ -40,6 +42,7 @@ class Pipeline:
     def refresh_cmc_top200(self):
         self.cmc.refresh_top200_cache()
 
+    # ---------- Utilidad: exporta auditoría de universo ----------
     def _export_universe_audit(self, top200_symbols, all_usdt):
         """
         Exporta un CSV con el universo observado: bases USDT en Binance,
@@ -70,6 +73,7 @@ class Pipeline:
 
         return universe_csv
 
+    # ------------------- Ejecución semanal principal -------------------
     def run_weekly(self, total_budget: float = 0.0):
         cfg_run = self.settings.get("run", {}) or {}
         send_tg = bool(cfg_run.get("send_telegram", False))
@@ -203,6 +207,34 @@ class Pipeline:
         # 4) Asignación de presupuesto
         allocation = allocate_budgets(self.settings, lane_decisions, total_budget, eligible)
 
+        # ---------- Entry Triggers (compra) para mostrar en Telegram ----------
+        cfg_signals = self.settings.get("signals", {}) or {}
+        cfg_entry = self.settings.get("entry_trailing", {}) or {}
+        near_sma_mult = float(cfg_signals.get("near_sma_mult", 1.08))
+        lookback_days = int(cfg_entry.get("lookback_days_for_min", 10))
+        trigger_from_min_pct = float(cfg_entry.get("trigger_from_min_pct", 0.03))
+
+        entry_triggers = {}
+        # Nota: 'metrics' debería proveer la serie de cierres ('closes').
+        # Si aún no la expones en SymbolMetrics, añade 'closes' en features/indicators.py.
+        for sym, m, o, s, z in rows:
+            try:
+                closes = getattr(m, "closes", None) or getattr(o, "closes", None)
+                if not closes:
+                    continue
+                trig = build_entry_trigger(
+                    symbol=sym,
+                    closes=closes,
+                    sma200=m.sma200,
+                    near_sma_mult=near_sma_mult,
+                    lookback_days=lookback_days,
+                    trigger_from_min_pct=trigger_from_min_pct,
+                )
+                if trig:
+                    entry_triggers[sym] = trig
+            except Exception:
+                continue
+
         # 5) Export básico
         export_weekly(self.persistence, lane_decisions, allocation, rows, eligible)
 
@@ -230,7 +262,15 @@ class Pipeline:
         print(f"[DIAG] Full diagnostics saved to: {diag_full}")
 
         # 7) Mensaje Telegram (preview y envío opcional)
-        msg = format_weekly_message(self.settings, lane_decisions, allocation, rows, eligible)
+        #   Paso 'entry_triggers' como kwarg opcional para no romper tu formatter si aún no lo soporta.
+        try:
+            msg = format_weekly_message(
+                self.settings, lane_decisions, allocation, rows, eligible, entry_triggers=entry_triggers
+            )
+        except TypeError:
+            # compat: versión antigua del formatter sin entry_triggers
+            msg = format_weekly_message(self.settings, lane_decisions, allocation, rows, eligible)
+
         print("\n=== TELEGRAM MESSAGE PREVIEW ===\n" + msg + "\n")
         if send_tg:
             self.tg.send_message(msg)
