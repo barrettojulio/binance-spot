@@ -23,4 +23,4 @@ data/snapshots/
 git init
 git config user.name "barrettojulio"
 git config user.email "julioc.barretoq@outlook.com"
-git branch -M main
+it branch -M main
