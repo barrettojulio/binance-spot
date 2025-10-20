@@ -10,9 +10,9 @@ run:
 
   # --- NUEVO: control de tasa para evitar 429/timeouts ---
   # Delay entre llamadas de klines (Fase 1)
-  request_delay_seconds_phase1: 0.80
+  request_delay_seconds_phase1: 0.50
   # Delay entre llamadas de orderflow (Fase 2)
-  request_delay_seconds: 0.80
+  request_delay_seconds: 0.50
 
   # Opcional para probar/estabilizar: procesa solo N símbolos por corrida
   # (quítalo o súbelo cuando veas estable la ejecución)
