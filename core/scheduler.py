@@ -1,90 +1,171 @@
+# core/scheduler.py
+from __future__ import annotations
+
 import os
-from pathlib import Path
+import sys
 import yaml
+from typing import Any, Dict, Optional
+
 from dotenv import load_dotenv
 
 from core.pipeline import Pipeline
 
 
-def _project_root() -> Path:
-    """
-    Devuelve la carpeta raíz del proyecto (donde vive cli.py).
-    Este archivo está en core/, así que subimos 1 nivel.
-    """
-    return Path(__file__).resolve().parents[1]
+# -----------------------------
+# Utilidades de configuración
+# -----------------------------
+
+def _load_file_text(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
 
 
-def _load_settings(settings_path: str) -> dict:
-    """
-    Lee settings.yaml, carga .env desde la raíz del proyecto, y sobrescribe
-    las claves del bloque `api` con las presentes en el entorno (si existen).
-    """
-    # 1) Cargar settings.yaml
-    with open(settings_path, "r", encoding="utf-8") as f:
-        settings = yaml.safe_load(f) or {}
+def _safe_load_yaml(path: str) -> Dict[str, Any]:
+    try:
+        text = _load_file_text(path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"[ERROR] settings file not found: {path}")
+    try:
+        data = yaml.safe_load(text) or {}
+        if not isinstance(data, dict):
+            raise ValueError("settings root must be a mapping")
+        return data
+    except yaml.YAMLError as e:
+        raise RuntimeError(f"[ERROR] YAML parse error in {path}: {e}")
 
-    # 2) Cargar .env explícitamente desde la raíz del proyecto (independiente del CWD)
-    env_path = _project_root() / ".env"
-    load_dotenv(dotenv_path=env_path, override=True)
 
-    # 3) Sobrescribir API keys/token desde variables de entorno (si existen)
-    env_map = {
-        "cmc_key": os.getenv("CMC_API_KEY"),
-        "telegram_token": os.getenv("TELEGRAM_BOT_TOKEN"),
-        "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID"),
-        # Opcionales (si algún día activas trading privado):
-        "binance_key": os.getenv("BINANCE_API_KEY"),
-        "binance_secret": os.getenv("BINANCE_API_SECRET"),
-    }
+def _bool_from_env(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    v = value.strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def _merge_env_into_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sobrescribe credenciales y banderas desde .env si están presentes.
+    Variables soportadas:
+      - CMC_API_KEY
+      - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_CHAT_ID
+      - SEND_TELEGRAM (opcional: fuerza envío)
+      - DEFAULT_BUDGET (opcional)
+    """
     api = settings.setdefault("api", {})
-    for k, v in env_map.items():
-        if v:
-            api[k] = v
+    run = settings.setdefault("run", {})
 
-    # 4) (Opcional) presupuesto por defecto desde .env si no está en settings
-    #    DEFAULT_BUDGET se usa en run_weekly cuando no pasas --budget
-    run_cfg = settings.setdefault("run", {})
-    if not run_cfg.get("default_budget"):
+    cmc_env = os.getenv("CMC_API_KEY")
+    tg_token_env = os.getenv("TELEGRAM_BOT_TOKEN")
+    tg_chat_env = os.getenv("TELEGRAM_CHAT_ID")
+    send_tg_env = _bool_from_env(os.getenv("SEND_TELEGRAM"))
+    default_budget_env = os.getenv("DEFAULT_BUDGET")
+
+    if cmc_env:
+        api["cmc_key"] = cmc_env
+    if tg_token_env:
+        api["telegram_token"] = tg_token_env
+    if tg_chat_env:
+        api["telegram_chat_id"] = tg_chat_env
+    if send_tg_env is not None:
+        run["send_telegram"] = bool(send_tg_env)
+    if default_budget_env:
         try:
-            env_default_budget = float(os.getenv("DEFAULT_BUDGET", "0") or 0)
-            if env_default_budget > 0:
-                run_cfg["default_budget"] = env_default_budget
+            run["default_budget"] = float(default_budget_env)
         except ValueError:
             pass
-
-    # Logs mínimos para saber si tomó variables del entorno (sin exponerlas):
-    print(f"[ENV] Loaded .env from: {env_path} | CMC: {bool(api.get('cmc_key'))} | TG: {bool(api.get('telegram_token'))}")
 
     return settings
 
 
-def run_refresh_cmc(settings_path: str):
+def _env_banner(settings_path: str, settings: Dict[str, Any]) -> None:
+    env_loaded_from = None
+    # dotenv devuelve True/False; no da la ruta. La inferimos si existe .env en cwd.
+    # Preferimos mostrar una ruta amigable si el archivo existe.
+    cwd_env = os.path.join(os.getcwd(), ".env")
+    if os.path.exists(cwd_env):
+        env_loaded_from = cwd_env
+    else:
+        # otras ubicaciones comunes (no garantizado)
+        possible = [".env", os.path.join(os.path.dirname(settings_path), ".env")]
+        for p in possible:
+            if os.path.exists(p):
+                env_loaded_from = p
+                break
+
+    api = settings.get("api", {}) or {}
+    has_cmc = bool(api.get("cmc_key"))
+    has_tg = bool(api.get("telegram_token")) and bool(api.get("telegram_chat_id"))
+    print(
+        f"[ENV] Loaded .env from: {env_loaded_from or '(not found)'} | "
+        f"CMC: {str(has_cmc)} | TG: {str(has_tg)}"
+    )
+
+
+def _normalize_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    # Aseguramos estructuras y defaults mínimos
+    settings.setdefault("api", {})
+    run = settings.setdefault("run", {})
+    run.setdefault("cvd_hours", 24)
+    run.setdefault("ob_levels", 20)
+    run.setdefault("request_delay_seconds_phase1", 0.50)
+    run.setdefault("request_delay_seconds", 0.50)
+    run.setdefault("http_timeout_seconds", 30)
+    run.setdefault("http_max_retries", 5)
+    run.setdefault("http_backoff_base", 0.5)
+    return settings
+
+
+def _load_settings(settings_path: str) -> Dict[str, Any]:
+    # 1) YAML
+    settings = _safe_load_yaml(settings_path)
+    # 2) .env (si existe)
+    load_dotenv()  # no lanza excepción si no hay .env
+    # 3) Fusionar env → settings
+    settings = _merge_env_into_settings(settings)
+    # 4) Normalizar
+    settings = _normalize_settings(settings)
+    # 5) Banner informativo
+    _env_banner(settings_path, settings)
+    return settings
+
+
+# -----------------------------
+# Runners públicos
+# -----------------------------
+
+def run_refresh_cmc(settings_path: str) -> None:
     """
-    Refresca manualmente el Top-200 de CoinMarketCap y actualiza el cache local.
-    Usa CMC_API_KEY desde .env (o desde settings.yaml si ahí está definida).
+    Refresca el caché del Top-200 de CMC (manual).
     """
     settings = _load_settings(settings_path)
-    pl = Pipeline(settings)
-    pl.refresh_cmc_top200()
-    print("[CMC] Top-200 cache refreshed.")
+    pipeline = Pipeline(settings)
+    pipeline.refresh_cmc_top200()
 
 
-def run_weekly(settings_path: str, total_budget: float = 0.0):
+def run_weekly(settings_path: str, total_budget: Optional[float] = None) -> None:
     """
-    Ejecuta el análisis semanal end-to-end.
-    - Si no se pasa --budget, usa run.default_budget de settings.yaml o DEFAULT_BUDGET del .env.
+    Ejecuta el análisis semanal con presupuesto total en USDT.
+    Si total_budget es None, usa run.default_budget del YAML (si existe),
+    en caso contrario 0.0 (con warning).
     """
     settings = _load_settings(settings_path)
 
-    # Presupuesto por defecto si no se pasó --budget
-    if not total_budget:
-        try:
-            total_budget = float(
-                settings.get("run", {}).get("default_budget", 0) or os.getenv("DEFAULT_BUDGET", "0") or 0
-            )
-        except ValueError:
-            total_budget = 0.0
+    run_cfg = settings.get("run", {}) or {}
+    if total_budget is None:
+        total_budget = run_cfg.get("default_budget", 0.0)
 
-    pl = Pipeline(settings)
-    pl.run_weekly(total_budget=total_budget)
-    print("[WEEKLY] Run finished.")
+    try:
+        total_budget = float(total_budget)
+    except Exception:
+        total_budget = 0.0
+
+    if total_budget <= 0:
+        print("[WARN] total_budget <= 0. "
+              "Using 0 USDT. Pass --budget in CLI or define run.default_budget in settings.")
+
+    pipeline = Pipeline(settings)
+    pipeline.run_weekly(total_budget=total_budget)
