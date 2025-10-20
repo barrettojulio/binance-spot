@@ -1,14 +1,13 @@
 api:
-  # Estos valores se sobreescriben desde .env si existen:
-  # CMC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+  # Estos campos pueden sobrescribirse desde .env (CMC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
   cmc_key: "PUT_YOUR_CMC_API_KEY"
   telegram_token: "PUT_YOUR_TELEGRAM_BOT_TOKEN"
   telegram_chat_id: "PUT_YOUR_TELEGRAM_CHAT_ID"
 
 run:
-  send_telegram: false          # pon true cuando quieras enviar a Telegram
-  cvd_hours: 24                 # ventana de orderflow (CVD/aggTrades)
-  ob_levels: 20                 # niveles del orderbook (depth)
+  send_telegram: false
+  cvd_hours: 24
+  ob_levels: 20
 
   # Control de tasa / robustez HTTP
   request_delay_seconds_phase1: 0.50  # delay entre klines (Fase 1)
@@ -17,43 +16,52 @@ run:
   http_max_retries: 5
   http_backoff_base: 0.5
 
-  # Pruebas/estabilización (opcional). Quita o sube cuando esté estable.
+  # Para estabilizar durante pruebas (opcional). Quita cuando esté estable.
   # limit_symbols: 80
 
-  # Presupuesto por defecto (opcional; si no pasas --budget en CLI)
+  # Presupuesto por defecto si no pasas --budget (opcional)
   # default_budget: 5000
 
 lanes:
-  # Asignación semanal por carril
-  btc:  { weight: 0.25, trailing: 0.038, buy_threshold: 60 }
-  eth:  { weight: 0.15, trailing: 0.050, buy_threshold: 60 }
-  top20:{ weight: 0.60, trailing_default: 0.07, max_candidates: 20, buy_threshold: 60 }
+  btc:
+    weight: 0.25
+    trailing: 0.038
+    buy_threshold: 60
+  eth:
+    weight: 0.15
+    trailing: 0.050
+    buy_threshold: 60
+  top20:
+    weight: 0.60
+    trailing_default: 0.07
+    max_candidates: 20
+    buy_threshold: 60
 
 quality:
-  # Filtros de calidad para evitar low-liquidity y volatilidad extrema
-  min_avg_vol_usd: 6000000     # antes 8M
-  max_atr_pct: 22              # antes 18
+  # Liquidez mínima y techo de volatilidad
+  min_avg_vol_usd: 6000000
+  max_atr_pct: 22
 
 signals:
-  # Señales de acumulación (ajustadas a tu distribución real)
-  vol_vs_avg_min: 1.08         # volumen actual vs promedio 12m
-  taker_buy_dom_min: 0.53      # dominio de compras agresivas
-  ob_imb_bid_min: 0.53         # desequilibrio del lado bid en orderbook
-  near_sma_mult: 1.08          # precio ≤ 1.08 × SMA200 (zona de valor)
-  confirm_days: 1              # días de confirmación de la señal
+  # Señales de acumulación
+  vol_vs_avg_min: 1.08
+  taker_buy_dom_min: 0.53
+  ob_imb_bid_min: 0.53
+  near_sma_mult: 1.08
+  confirm_days: 1
 
-# Trailing para COMPRAS (entra solo si hay rebote desde un mínimo reciente)
 entry_trailing:
-  lookback_days_for_min: 10     # ancla al mínimo de los últimos N días
-  trigger_from_min_pct: 0.03    # compra si sube ≥3% desde ese mínimo (2–4%)
+  # Trailing para COMPRAS (rebote desde mínimo reciente)
+  lookback_days_for_min: 10
+  trigger_from_min_pct: 0.03
 
-# Trailing para VENTAS PARCIALES (asegurar ganancias sin dejar de holdear)
 exit_trailing:
+  # Trailing para VENTAS PARCIALES
   btc: 0.038
   eth: 0.050
   top20_default: 0.07
-  partial_take_pct: 0.30        # vende 30% si se activa el trailing
+  partial_take_pct: 0.30
 
 report:
   locale: "en"
-  show_transfers: true          # muestra transferencias BTC/ETH → Top-20 cuando están en PAUSE
+  show_transfers: true
