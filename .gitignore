@@ -1,0 +1,26 @@
+# Entornos / IDE
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+
+# Config sensibles
+.env
+config/settings.local.yaml
+
+# Datos y salidas
+data/
+*.csv
+*.xlsx
+*.zip
+logs/
+*.log
+
+# Cachés propios
+data/cache_klines/
+data/snapshots/
+
+git init
+git config user.name "barrettojulio"
+git config user.email "julioc.barretoq@outlook.com"
+git branch -M main

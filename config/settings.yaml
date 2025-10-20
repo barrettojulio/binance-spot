@@ -1,0 +1,39 @@
+api:
+  cmc_key: "PUT_YOUR_CMC_API_KEY"
+  telegram_token: "PUT_YOUR_TELEGRAM_BOT_TOKEN"
+  telegram_chat_id: "PUT_YOUR_TELEGRAM_CHAT_ID"
+
+run:
+  send_telegram: false
+  cvd_hours: 24
+  ob_levels: 20
+
+  # --- NUEVO: control de tasa para evitar 429/timeouts ---
+  # Delay entre llamadas de klines (Fase 1)
+  request_delay_seconds_phase1: 0.80
+  # Delay entre llamadas de orderflow (Fase 2)
+  request_delay_seconds: 0.80
+
+  # Opcional para probar/estabilizar: procesa solo N símbolos por corrida
+  # (quítalo o súbelo cuando veas estable la ejecución)
+  limit_symbols: 200
+
+lanes:
+  btc: { weight: 0.25, trailing: 0.038, buy_threshold: 65 }
+  eth: { weight: 0.15, trailing: 0.05,  buy_threshold: 65 }
+  top20: { weight: 0.60, trailing_default: 0.07, max_candidates: 20, buy_threshold: 65 }
+
+quality:
+  min_avg_vol_usd: 8000000
+  max_atr_pct: 18
+
+signals:
+  vol_vs_avg_min: 1.15
+  taker_buy_dom_min: 0.55
+  ob_imb_bid_min: 0.55
+  near_sma_mult: 1.10
+  confirm_days: 2
+
+report:
+  locale: "en"
+  show_transfers: true
