@@ -1,4 +1,3 @@
-# core/pipeline.py
 import time
 import os
 import csv
@@ -24,9 +23,9 @@ from reporting.exports import export_weekly
 from reporting.telegram_sender import TelegramSender
 
 from reporting.diagnostics import (
-    export_diagnostics,
-    export_diagnostics_full,
-    _reason_and_flags,
+    export_diagnostics,          # CSV compacto (evaluados)
+    export_diagnostics_full,     # CSV completo (incluye filtrados y excepciones)
+    _reason_and_flags,           # helper para checks de señal
 )
 
 
@@ -42,6 +41,10 @@ class Pipeline:
         self.cmc.refresh_top200_cache()
 
     def _export_universe_audit(self, top200_symbols, all_usdt):
+        """
+        Exporta un CSV con el universo observado: bases USDT en Binance,
+        si están en el Top-200 de CMC y qué símbolos USDT tienen.
+        """
         os.makedirs("data/snapshots", exist_ok=True)
         ts = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         universe_csv = f"data/snapshots/universe_{ts}.csv"
@@ -55,13 +58,16 @@ class Pipeline:
         with open(universe_csv, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["base", "has_usdt_pair_on_binance", "is_in_cmc_top200", "binance_symbols_joined"])
+            # Todas las bases que Binance tiene con USDT
             for base in sorted(by_base.keys()):
                 in_top200 = base in cmc_set
                 syms_join = ",".join(sorted(by_base[base]))
                 w.writerow([base, True, in_top200, syms_join])
+            # Bases en CMC que NO están como USDT en Binance
             binance_bases = set(by_base.keys())
             for base in sorted(cmc_set - binance_bases):
                 w.writerow([base, False, True, ""])
+
         return universe_csv
 
     def run_weekly(self, total_budget: float = 0.0):
@@ -69,13 +75,13 @@ class Pipeline:
         send_tg = bool(cfg_run.get("send_telegram", False))
         cvd_hours = int(cfg_run.get("cvd_hours", 24))
         ob_levels = int(cfg_run.get("ob_levels", 20))
-        req_delay_p1 = float(cfg_run.get("request_delay_seconds_phase1", 0.50))
-        req_delay = float(cfg_run.get("request_delay_seconds", 0.50))
+        req_delay_p1 = float(cfg_run.get("request_delay_seconds_phase1", 0.50))  # Fase 1: klines
+        req_delay = float(cfg_run.get("request_delay_seconds", 0.50))            # Fase 2: orderflow
         limit_symbols = int(cfg_run.get("limit_symbols", 0))
 
-        # 1) Universo
-        top200 = self.cmc.load_top200_cache()
-        all_usdt = self.binance.list_usdt_symbols()
+        # 1) Universo (Top-200 CMC ∩ Binance USDT)
+        top200 = self.cmc.load_top200_cache()                     # lista de 'BASE' (BTC, ETH, ...)
+        all_usdt = self.binance.list_usdt_symbols()               # [{"symbol":"BTCUSDT","base":"BTC"}, ...]
         binance_bases = {x["base"] for x in all_usdt}
         cmc_set = {s.upper() for s in top200}
         matched_bases = sorted(list(cmc_set.intersection(binance_bases)))
@@ -88,14 +94,16 @@ class Pipeline:
             print("[UNIVERSE] No CMC Top-200 bases found with USDT pairs on Binance. Check universe CSV and CMC cache.")
             return
 
+        # Símbolos Binance (ej. BTCUSDT, ETHUSDT, ...)
         symbols = self.binance.get_usdt_symbols_intersection(top200)
         if limit_symbols and limit_symbols > 0:
             symbols = symbols[:limit_symbols]
 
         # === FASE 1: Indicadores + Filtros de Calidad (sin orderflow) ===
-        prequalified = []
-        scanned = []
-        fail_liq = fail_atr = 0
+        prequalified = []  # [(sym, metrics, qflags)]
+        scanned = []       # lista completa para diagnóstico total
+        fail_liq = 0
+        fail_atr = 0
         exceptions_phase1 = 0
         errors_counter = {}
 
@@ -123,11 +131,12 @@ class Pipeline:
                         order=None, scores=None, zone=None, fail_reason=None
                     ))
 
-                time.sleep(req_delay_p1)
+                time.sleep(req_delay_p1)  # control de tasa Fase 1
 
             except Exception as e:
                 exceptions_phase1 += 1
-                msg = f"exception_phase1: {str(e)[:180]}"
+                # incluye tipo de excepción y símbolo para depurar rápido
+                msg = f"exception_phase1: {type(e).__name__}: {str(e)[:160]} (symbol={sym})"
                 errors_counter[msg] = errors_counter.get(msg, 0) + 1
                 scanned.append(dict(
                     symbol=sym, phase="FILTERED", metrics=None, qflags=None,
@@ -143,6 +152,7 @@ class Pipeline:
                 print(f"  x{v} -> {k}")
 
         if not prequalified:
+            # Export diagnóstico completo hasta aquí y salir con reporte vacío
             diag_full = export_diagnostics_full(self.settings, scanned, out_dir="data/snapshots")
             print(f"[DIAG] Full diagnostics saved to: {diag_full}")
             lane_decisions = {"BTC": "PAUSE", "ETH": "PAUSE"}
@@ -156,7 +166,7 @@ class Pipeline:
             return
 
         # === FASE 2: Orderflow + Scoring + Clasificación (solo prequalified) ===
-        rows = []
+        rows = []              # (sym, metrics, order, scores, zone)
         exceptions_phase2 = 0
 
         for sym, metrics, qflags in prequalified:
@@ -166,15 +176,17 @@ class Pipeline:
                 zone = classify_zone(self.settings, metrics, order, scores)
 
                 rows.append((sym, metrics, order, scores, zone))
+                # completar/duplicar entrada en 'scanned' con order/score/zone
                 scanned.append(dict(
                     symbol=sym, phase="EVALUATED", metrics=metrics, qflags=qflags,
                     order=order, scores=scores, zone=zone, fail_reason=None
                 ))
 
-                time.sleep(req_delay)
+                time.sleep(req_delay)  # control de tasa Fase 2
+
             except Exception as e:
                 exceptions_phase2 += 1
-                msg = f"exception_phase2: {str(e)[:180]}"
+                msg = f"exception_phase2: {type(e).__name__}: {str(e)[:160]} (symbol={sym})"
                 scanned.append(dict(
                     symbol=sym, phase="FILTERED", metrics=metrics, qflags=qflags,
                     order=None, scores=None, zone=None, fail_reason=msg
@@ -217,7 +229,7 @@ class Pipeline:
         diag_full = export_diagnostics_full(self.settings, scanned, out_dir="data/snapshots")
         print(f"[DIAG] Full diagnostics saved to: {diag_full}")
 
-        # 7) Mensaje Telegram
+        # 7) Mensaje Telegram (preview y envío opcional)
         msg = format_weekly_message(self.settings, lane_decisions, allocation, rows, eligible)
         print("\n=== TELEGRAM MESSAGE PREVIEW ===\n" + msg + "\n")
         if send_tg:
